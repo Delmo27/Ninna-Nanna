@@ -8,7 +8,7 @@ body.night{ --bg:#05070e; --card:#0c1022; --card2:#11172e; --line:#1a2140; --tex
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:16px;line-height:1.35}
 body{padding-bottom:calc(76px + env(safe-area-inset-bottom));transition:background .4s}
-button,input,select{font:inherit;color:inherit}
+button,input,select,textarea{font:inherit;color:inherit}
 [hidden]{display:none!important}
 
 #boot{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--muted);z-index:50}
@@ -56,6 +56,12 @@ button,input,select{font:inherit;color:inherit}
 .seg-toggle button.on{background:var(--feed);color:#00263a;border-color:transparent}
 .seg-toggle button.off.on{background:#39415f;color:var(--text)}
 
+/* suggerimento */
+.sugg{border-color:#3b4478;background:linear-gradient(135deg,var(--card),#1a2250)}
+body.night .sugg{background:var(--card)}
+.sugg.soft{background:var(--card);border-style:dashed}
+.sugg .sl{margin:4px 0 8px;font-size:16px}
+
 /* contatori */
 .counter{position:relative;background:var(--card2);border:1px solid var(--line);border-radius:18px;padding:12px 6px 10px;text-align:center;width:100%;cursor:pointer}
 .counter:active{transform:scale(.97)}
@@ -76,6 +82,7 @@ button,input,select{font:inherit;color:inherit}
 .bar .s.night{background:var(--night)}.bar .s.nap{background:var(--nap)}
 .bar .m{position:absolute;bottom:2px;width:6px;height:6px;border-radius:50%;margin-left:-3px;border:1px solid var(--card)}
 .bar .m.feed{background:var(--feed)}.bar .m.meal{background:var(--meal)}.bar .m.poop{background:var(--poop)}
+.bar .m.breast{background:var(--feed)}
 .ticks{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
 .stat{background:var(--card2);border-radius:14px;padding:11px 12px}
@@ -90,6 +97,7 @@ button,input,select{font:inherit;color:inherit}
 .tl .ic{width:28px;text-align:center;font-size:20px}
 .tl .t{font-weight:600}
 .tl .sub{color:var(--muted);font-size:13px}
+.sub.pre{white-space:pre-wrap}
 .tl li.child{padding-left:30px;opacity:.9}
 .tl li.child .ic{font-size:16px}
 
@@ -120,10 +128,12 @@ tr.clk{cursor:pointer}
 #modal .sheet{background:var(--card);width:100%;max-width:640px;max-height:92vh;overflow:auto;border-radius:22px 22px 0 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom))}
 #modal h3{margin:0 0 12px}
 label{display:block;font-size:13px;color:var(--muted);margin-bottom:10px}
-input[type=text],input[type=email],input[type=password],input[type=datetime-local],input[type=date],select{
+input[type=text],input[type=email],input[type=password],input[type=datetime-local],input[type=date],select,textarea{
   display:block;width:100%;margin-top:4px;padding:11px 12px;border-radius:12px;border:1px solid var(--line);background:var(--card2);color:var(--text);font-size:16px}
+textarea{font-family:inherit;resize:vertical;margin-top:0}
+.docbox{height:55vh;font-size:13px;font-family:ui-monospace,Consolas,monospace}
 label.chk{display:flex;align-items:center;gap:8px;color:var(--text);margin:0}
-label.chk input{width:22px;height:22px}
+label.chk input{width:22px;height:22px;flex:none}
 .r2{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end}
 .wrow{background:var(--card2);border-radius:14px;padding:10px;margin-bottom:10px}
 .btns{display:flex;gap:10px;margin-top:14px}

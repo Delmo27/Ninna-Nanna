@@ -4,8 +4,14 @@
    Dati: Firebase (login + Firestore). Se config.js non è compilato,
    parte in MODALITÀ PROVA con i dati solo sul telefono.
    ===================================================================== */
-const VERSION = '1.0.0';
-const NOTES = [
+const VERSION = '1.1.0';
+const NOTES = [ // dalla più recente
+  { v: '1.1.0', t: [
+    'Note del giorno (si salvano da sole), visibili anche nel recap settimanale.',
+    'Suggerimento non vincolante per il prossimo pisolino o la buonanotte, calcolato sulle ultime giornate.',
+    'In Oggi: da quanto tempo è sveglio.',
+    'Documento per l\'assistente integrato nell\'app (Altro), per far modificare l\'app a un\'AI.'
+  ] },
   { v: '1.0.0', t: ['Prima versione: pisolini, notte con risvegli e allattamento, contatori pasti e cacche, recap giornaliero e settimanale, modifica manuale.'] }
 ];
 const FIREBASE_VERSION = '10.14.1';
@@ -36,7 +42,7 @@ const buzz = () => { try { navigator.vibrate && navigator.vibrate(25); } catch (
 
 /* ---------- stato ---------- */
 const S = {
-  sleeps: [], events: [], settings: { childName: '' },
+  sleeps: [], events: [], notes: [], settings: { childName: '' },
   tab: 'today', day: todayStr(), weekStart: mondayOf(todayStr()),
   user: null, mode: 'demo', ready: false
 };
@@ -44,22 +50,20 @@ let api = null;
 let fb = null; // moduli firebase
 
 /* =====================================================================
-   LAYER DATI
+   LAYER DATI  (api.add / set / update / remove / saveSettings)
    ===================================================================== */
 function makeDemoApi(onData) {
   const KEY = 'nanna_demo_v1';
   const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } };
-  const state = Object.assign({ sleeps: {}, events: {}, settings: {} }, load());
+  const state = Object.assign({ sleeps: {}, events: {}, notes: {}, settings: {} }, load());
   const save = () => localStorage.setItem(KEY, JSON.stringify(state));
-  const push = () => onData({
-    sleeps: Object.entries(state.sleeps).map(([id, v]) => ({ id, ...v })),
-    events: Object.entries(state.events).map(([id, v]) => ({ id, ...v })),
-    settings: state.settings
-  });
+  const list = (o) => Object.entries(o).map(([id, v]) => ({ id, ...v }));
+  const push = () => onData({ sleeps: list(state.sleeps), events: list(state.events), notes: list(state.notes), settings: state.settings });
   const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   setTimeout(push, 0);
   return {
     add(col, data) { const id = uid(); state[col][id] = data; save(); push(); return id; },
+    set(col, id, data) { state[col][id] = { ...(state[col][id] || {}), ...data }; save(); push(); },
     update(col, id, patch) { if (state[col][id]) { state[col][id] = { ...state[col][id], ...patch }; save(); push(); } },
     remove(col, id) { delete state[col][id]; save(); push(); },
     saveSettings(obj) { state.settings = { ...state.settings, ...obj }; save(); push(); }
@@ -87,6 +91,7 @@ async function initFirebase(config) {
   };
   api = {
     add(col, data) { const ref = fsM.doc(fsM.collection(db, col)); fsM.setDoc(ref, data).catch(onErr); return ref.id; },
+    set(col, id, data) { fsM.setDoc(fsM.doc(db, col, id), data, { merge: true }).catch(onErr); },
     update(col, id, patch) { fsM.updateDoc(fsM.doc(db, col, id), patch).catch(onErr); },
     remove(col, id) { fsM.deleteDoc(fsM.doc(db, col, id)).catch(onErr); },
     saveSettings(obj) { fsM.setDoc(fsM.doc(db, 'settings', 'main'), obj, { merge: true }).catch(onErr); }
@@ -99,13 +104,14 @@ async function initFirebase(config) {
     const mapDocs = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     unsubs.push(fsM.onSnapshot(fsM.collection(db, 'sleeps'), (s) => { S.sleeps = mapDocs(s); S.ready = true; render(); }, onErr));
     unsubs.push(fsM.onSnapshot(fsM.collection(db, 'events'), (s) => { S.events = mapDocs(s); render(); }, onErr));
+    unsubs.push(fsM.onSnapshot(fsM.collection(db, 'notes'), (s) => { S.notes = mapDocs(s); render(); }, onErr));
     unsubs.push(fsM.onSnapshot(fsM.doc(db, 'settings', 'main'), (s) => { S.settings = s.exists() ? s.data() : { childName: '' }; render(); }, onErr));
   };
   authM.onAuthStateChanged(auth, (user) => {
     S.user = user;
     $('#boot').hidden = true;
     if (user) { $('#login').hidden = true; $('#app').hidden = false; start(); }
-    else { stop(); S.sleeps = []; S.events = []; S.ready = false; $('#app').hidden = true; showLogin(); }
+    else { stop(); S.sleeps = []; S.events = []; S.notes = []; S.ready = false; $('#app').hidden = true; showLogin(); }
   });
 }
 
@@ -114,6 +120,7 @@ async function initFirebase(config) {
    ===================================================================== */
 const activeSleep = () => S.sleeps.filter((s) => s.end == null).sort((a, b) => b.start - a.start)[0];
 const nightWakesOf = (s) => (s.wakes || []).filter((w) => !(w.end == null && s.end != null)); // esclude il risveglio "finale" del mattino
+const noteOf = (d) => { const n = S.notes.find((x) => x.id === d); return n ? (n.text || '') : ''; };
 
 function sleepIntervals(s, now) {
   const endT = s.end ?? now;
@@ -162,6 +169,73 @@ function dayStats(d) {
     totalMs: napMs + nightMs, feedsTotal: breast + nightFed,
     has: naps.length + nights.length + evs.length > 0
   };
+}
+
+/* =====================================================================
+   SUGGERIMENTO PROSSIMO PISOLINO (indicativo, non vincolante)
+   Si basa sugli ultimi 7 giorni completi: mediana delle finestre di
+   veglia prima di ogni pisolino, durata dei pisolini, buonanotte.
+   ===================================================================== */
+const median = (a) => { if (!a.length) return null; const t = [...a].sort((x, y) => x - y), m = t.length >> 1; return t.length % 2 ? t[m] : (t[m - 1] + t[m]) / 2; };
+const quant = (a, p) => { const t = [...a].sort((x, y) => x - y), i = (t.length - 1) * p, lo = Math.floor(i), hi = Math.ceil(i); return t[lo] + (t[hi] - t[lo]) * (i - lo); };
+const spread = (a) => (a.length >= 4 ? [quant(a, 0.25), quant(a, 0.75)] : [Math.min(...a), Math.max(...a)]);
+const lastWakeTs = () => { const e = S.sleeps.filter((s) => s.end != null).map((s) => s.end); const m = e.length ? Math.max(...e) : null; return m && Date.now() - m < 14 * HOUR ? m : null; };
+
+function history() {
+  const out = [];
+  for (let i = 1; i <= 7; i++) {
+    const d = addDays(todayStr(), -i);
+    const naps = S.sleeps.filter((s) => s.type === 'nap' && s.end != null && ymd(s.start) === d).sort((a, b) => a.start - b.start);
+    if (!naps.length) continue;
+    const morning = S.sleeps.filter((s) => s.type === 'night' && s.end != null && nightDay(s) === d).map((s) => s.end).sort((a, b) => b - a)[0];
+    const lastEnd = naps[naps.length - 1].end;
+    const eve = S.sleeps.filter((s) => s.type === 'night' && ymd(s.start) === d && s.start > lastEnd).sort((a, b) => a.start - b.start)[0];
+    out.push({
+      naps: naps.length,
+      dur: naps.map((n) => n.end - n.start),
+      win: naps.map((n, k) => { const from = k === 0 ? morning : naps[k - 1].end; return from != null ? n.start - from : null; }),
+      bed: eve ? eve.start - lastEnd : null,
+      bedClock: eve ? eve.start - dayStart(d) : null
+    });
+  }
+  return out;
+}
+
+function suggestion() {
+  if (localStorage.getItem('nanna_sugg_off') === '1') return null;
+  const valid = history().filter((x) => x.naps >= 2);
+  if (valid.length < 3) return { title: 'Suggerimenti', soft: true, lines: [`Servono almeno 3 giorni completi con i pisolini per calcolare i suoi ritmi (finora ${valid.length}).`] };
+  const foot = `Indicativo e non vincolante · basato sugli ultimi ${valid.length} giorni.`;
+  const typicalNaps = Math.round(median(valid.map((x) => x.naps)));
+  const pick = (key, i) => { const a = valid.map((x) => x[key][i]).filter((v) => v != null); return a.length >= 2 ? a : valid.flatMap((x) => x[key]).filter((v) => v != null); };
+  const a = activeSleep();
+  const todayNaps = S.sleeps.filter((s) => s.type === 'nap' && s.start >= dayStart(todayStr())).sort((x, y) => x.start - y.start);
+
+  if (a && a.type === 'nap') {
+    const k = Math.max(0, todayNaps.findIndex((s) => s.id === a.id));
+    const d = pick('dur', k); if (!d.length) return null;
+    const med = median(d), [lo, hi] = spread(d);
+    return { title: `Pisolino n. ${k + 1} in corso`, foot, lines: [`Di solito dura circa ${fmtDur(med)}: sveglia verso le ${fmtT(a.start + med)} (tra le ${fmtT(a.start + lo)} e le ${fmtT(a.start + hi)}).`] };
+  }
+  if (a) return null; // di notte nessun suggerimento
+  const last = lastWakeTs(); if (!last) return null;
+  const k = todayNaps.length;
+  if (k < typicalNaps) {
+    const w = pick('win', k); if (!w.length) return null;
+    const med = median(w), [lo, hi] = spread(w);
+    return { title: `Prossimo pisolino (n. ${k + 1})`, foot, lines: [`Di solito dopo circa ${fmtDur(med)} di veglia: verso le ${fmtT(last + med)} (tra le ${fmtT(last + lo)} e le ${fmtT(last + hi)}).`] };
+  }
+  const b = valid.map((x) => x.bed).filter((v) => v != null), c = valid.map((x) => x.bedClock).filter((v) => v != null);
+  const lines = [];
+  if (b.length >= 2) { const [lo, hi] = spread(b); lines.push(`Buonanotte: di solito circa ${fmtDur(median(b))} dopo l'ultimo pisolino, quindi verso le ${fmtT(last + median(b))} (tra le ${fmtT(last + lo)} e le ${fmtT(last + hi)}).`); }
+  if (c.length >= 2) lines.push(`Orario tipico di buonanotte: ${fmtT(dayStart(todayStr()) + median(c))}.`);
+  if (!lines.length) lines.push('Pisolini tipici della giornata completati.');
+  return { title: 'Verso la notte', foot, lines };
+}
+
+function suggestionHTML() {
+  const s = suggestion(); if (!s) return '';
+  return `<div class="card sugg ${s.soft ? 'soft' : ''}"><h2>💡 ${esc(s.title)}</h2>${s.lines.map((l) => `<p class="sl">${esc(l)}</p>`).join('')}${s.foot ? `<p class="muted small" style="margin-bottom:0">${esc(s.foot)}</p>` : ''}</div>`;
 }
 
 /* =====================================================================
@@ -236,49 +310,89 @@ const A = {
   manual() { openChooser(); },
   saveName() { const v = $('#nameInput').value.trim(); api.saveSettings({ childName: v }); toast('Nome salvato'); },
   logout() { fb.authM.signOut(fb.auth); },
+  async copyDoc() {
+    const t = await loadDoc(); if (!t) return;
+    try { await navigator.clipboard.writeText(t); toast('Documento copiato ✅'); } catch (e) { A.showDoc(); }
+  },
+  async showDoc() {
+    const t = await loadDoc(); if (!t) return;
+    openModal(`<h3>Documento per l'assistente</h3><textarea class="docbox" readonly>${esc(t)}</textarea>
+      <div class="btns"><button class="btn" data-m="close">Chiudi</button><button class="btn primary" data-m="copy">📋 Copia</button></div>`, {
+      copy() {
+        const ta = $('.docbox'); ta.select(); ta.setSelectionRange(0, 999999);
+        let ok = false; try { ok = document.execCommand('copy'); } catch (e) { /* noop */ }
+        toast(ok ? 'Copiato ✅' : 'Seleziona il testo e copialo a mano');
+      }
+    });
+  },
   export() {
-    const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), settings: S.settings, sleeps: S.sleeps, events: S.events }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), settings: S.settings, sleeps: S.sleeps, events: S.events, notes: S.notes }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = `nanna-backup-${todayStr()}.json`; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
 };
 
+async function loadDoc() {
+  try { const r = await fetch('assistente.md', { cache: 'no-store' }); if (!r.ok) throw new Error('x'); return await r.text(); }
+  catch (e) { toast('Documento non disponibile (serve la connessione)'); return null; }
+}
+
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
   if (el && A[el.dataset.act]) { e.preventDefault(); A[el.dataset.act](el); }
 });
+
+/* note del giorno: salvataggio automatico (dopo 1,2 s senza digitare, e all'uscita dal campo) */
+let noteTimer = null;
+function saveNote(el, quiet) {
+  const d = el.dataset.d, text = el.value.trim();
+  if (noteOf(d) === text) return;
+  if (text) api.set('notes', d, { text, by: who(), updated: Date.now() }); else api.remove('notes', d);
+  if (!quiet) toast('Nota salvata');
+}
+document.addEventListener('input', (e) => {
+  const note = e.target.closest('textarea.note');
+  if (!note) return;
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => saveNote(note, true), 1200);
+});
 document.addEventListener('change', (e) => {
-  const el = e.target.closest('[data-change="pickDay"]');
-  if (el && el.value) { S.day = el.value; render(); }
+  const pick = e.target.closest('[data-change="pickDay"]');
+  if (pick && pick.value) { S.day = pick.value; render(); return; }
+  const note = e.target.closest('textarea.note');
+  if (note) { clearTimeout(noteTimer); saveNote(note, false); return; }
+  if (e.target.matches('[data-change="toggleSugg"]')) { localStorage.setItem('nanna_sugg_off', e.target.checked ? '0' : '1'); render(); }
 });
 
 /* =====================================================================
    RENDER
    ===================================================================== */
+function setHTML(el, html) { if (el.__h !== html) { el.innerHTML = html; el.__h = html; } }
+
 function render() {
   if (!api) return;
   const view = $('#view');
   if (!view) return;
   const focused = document.activeElement;
-  if (focused && view.contains(focused) && focused.tagName === 'INPUT' && focused.type === 'text') return; // non disturbare chi sta scrivendo
+  if (focused && view.contains(focused) && (focused.tagName === 'TEXTAREA' || (focused.tagName === 'INPUT' && focused.type === 'text'))) return; // non disturbare chi sta scrivendo
   const y = window.scrollY;
   const active = activeSleep();
   document.body.classList.toggle('night', !!(active && active.type === 'night'));
 
   const name = (S.settings.childName || '').trim();
-  $('#hdr').innerHTML = `<div><h1>🌙 ${esc(name || 'Nanna')}</h1><div class="sub">${esc(dayLong(todayStr()))}</div></div>
-    <span class="badge ${S.mode === 'firebase' ? 'ok' : ''}">${S.mode === 'firebase' ? 'sincronizzato' : 'modalità prova'}</span>`;
+  setHTML($('#hdr'), `<div><h1>🌙 ${esc(name || 'Nanna')}</h1><div class="sub">${esc(dayLong(todayStr()))}</div></div>
+    <span class="badge ${S.mode === 'firebase' ? 'ok' : ''}">${S.mode === 'firebase' ? 'sincronizzato' : 'modalità prova'}</span>`);
 
-  $('#nav').innerHTML = [['today', '🏠', 'Oggi'], ['days', '📅', 'Giorni'], ['week', '📊', 'Settimana'], ['more', '⚙️', 'Altro']]
-    .map(([v, i, l]) => `<button data-act="tab" data-v="${v}" class="${S.tab === v ? 'on' : ''}"><span>${i}</span>${l}</button>`).join('');
+  setHTML($('#nav'), [['today', '🏠', 'Oggi'], ['days', '📅', 'Giorni'], ['week', '📊', 'Settimana'], ['more', '⚙️', 'Altro']]
+    .map(([v, i, l]) => `<button data-act="tab" data-v="${v}" class="${S.tab === v ? 'on' : ''}"><span>${i}</span>${l}</button>`).join(''));
 
   let html = '';
   if (S.tab === 'today') html = todayHTML();
   else if (S.tab === 'days') html = daysHTML();
   else if (S.tab === 'week') html = weekHTML();
   else html = moreHTML();
-  view.innerHTML = html;
+  setHTML(view, html);
   window.scrollTo(0, y);
   tick();
 }
@@ -292,7 +406,8 @@ function tick() {
 function heroHTML() {
   const a = activeSleep();
   if (!a) {
-    return `<div class="card hero"><div class="state">Al momento è sveglio</div>
+    const lw = lastWakeTs();
+    return `<div class="card hero"><div class="state">${lw ? `Sveglio da <b data-since="${lw}">0:00</b>` : 'Al momento è sveglio'}</div>
       <div class="stack" style="margin-top:12px">
         <button class="btn nap big" data-act="startNap">☀️ Inizia pisolino</button>
         <button class="btn primary big" data-act="startNight">🌙 Inizia notte (si addormenta)</button>
@@ -341,10 +456,16 @@ function todayHTML() {
   const name = (S.settings.childName || '').trim();
   const nameCard = name ? '' : `<div class="card"><h2>Benvenuto!</h2><label>Come si chiama il piccolo?<input type="text" id="nameInput" placeholder="Nome" maxlength="30"></label><button class="btn primary block" data-act="saveName">Salva</button></div>`;
   const banner = S.mode === 'demo' ? `<div class="card small muted">⚠️ Modalità prova: i dati restano solo su questo telefono. Compila <b>config.js</b> con i dati Firebase per condividerli con tua moglie.</div>` : '';
-  return nameCard + banner + heroHTML() + countersHTML() + recapHTML(todayStr(), true);
+  return nameCard + banner + heroHTML() + suggestionHTML() + countersHTML() + recapHTML(todayStr(), true);
 }
 
 /* ---------- recap giornaliero ---------- */
+function noteCardHTML(d) {
+  return `<div class="card"><h2>📝 Note del giorno</h2>
+    <textarea class="note" rows="3" data-d="${d}" placeholder="Es. primi dentini, vaccino, giornata agitata, nuovo alimento…">${esc(noteOf(d))}</textarea>
+    <p class="muted small" style="margin-bottom:0">Si salva da sola.</p></div>`;
+}
+
 function barHTML(d) {
   const now = Date.now(), a = dayStart(d), b = dayEnd(d), span = b - a;
   let h = '';
@@ -359,7 +480,7 @@ function barHTML(d) {
 function recapHTML(d, withList) {
   const st = dayStats(d);
   if (!st.has) {
-    return `<div class="card"><h2>Recap ${d === todayStr() ? 'di oggi' : esc(dayShort(d))}</h2><p class="muted">Ancora nessun dato per questo giorno.</p>${barHTML(d)}</div>${withList ? '' : ''}`;
+    return `<div class="card"><h2>Recap ${d === todayStr() ? 'di oggi' : esc(dayShort(d))}</h2><p class="muted">Ancora nessun dato per questo giorno.</p>${barHTML(d)}</div>${withList ? noteCardHTML(d) : ''}`;
   }
   const stat = (k, v, dsc = '') => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div>${dsc ? `<div class="d">${dsc}</div>` : ''}</div>`;
   return `<div class="card"><h2>Recap ${d === todayStr() ? 'di oggi' : esc(dayShort(d))}</h2>
@@ -377,7 +498,7 @@ function recapHTML(d, withList) {
       ${stat('💩 Cacche', st.poop)}
       ${stat('🛏️ Buonanotte / sveglia', `${st.bedtime ? fmtT(st.bedtime) : '–'} → ${st.wakeup ? fmtT(st.wakeup) : '–'}`, 'notte conteggiata nel giorno del risveglio')}
     </div></div>
-    ${withList ? timelineHTML(d, d === todayStr() ? 'desc' : 'asc') : ''}`;
+    ${withList ? noteCardHTML(d) + timelineHTML(d, d === todayStr() ? 'desc' : 'asc') : ''}`;
 }
 
 function timelineHTML(d, order) {
@@ -468,6 +589,8 @@ function weekHTML() {
   const num = (v) => (v == null ? '–' : v.toFixed(1).replace('.', ','));
   const dur = (v) => (v == null ? '–' : fmtDur(v));
   const hasPrev = p.n > 0;
+  const noteItems = w.days.filter((x) => noteOf(x.d)).map((x) => `<li data-act="openDay" data-d="${x.d}"><span class="ic">📝</span><div><div class="t">${WD[parseYmd(x.d).getDay()]} ${parseYmd(x.d).getDate()}</div><div class="sub pre">${esc(noteOf(x.d))}</div></div></li>`).join('');
+  const notesCard = noteItems ? `<div class="card"><h2>Note della settimana</h2><ul class="tl">${noteItems}</ul></div>` : '';
   const rows = w.days.map((x) => `<tr class="clk" data-act="openDay" data-d="${x.d}"><td>${WD[parseYmd(x.d).getDay()]} ${parseYmd(x.d).getDate()}</td>
     <td>${x.has ? fmtDur(x.totalMs) : '–'}</td><td>${x.has ? fmtDur(x.nightMs) : '–'}</td><td>${x.has ? x.napCount : '–'}</td>
     <td>${x.has ? x.wakes : '–'}</td><td>${x.has ? x.feedsTotal : '–'}</td><td>${x.has ? x.meal : '–'}</td><td>${x.has ? x.poop : '–'}</td></tr>`).join('');
@@ -477,7 +600,7 @@ function weekHTML() {
       <button class="iconbtn" data-act="weekNext" aria-label="Settimana successiva">▶</button>
     </div>
     ${isCur ? '' : '<button class="btn small block" data-act="weekToday">Torna a questa settimana</button>'}
-    ${w.n === 0 ? '<div class="card"><p class="muted">Nessun dato in questa settimana.</p></div>' : `
+    ${w.n === 0 ? `<div class="card"><p class="muted">Nessun dato in questa settimana.</p></div>${notesCard}` : `
     <div class="card"><h2>Medie giornaliere (${w.n} ${w.n === 1 ? 'giorno' : 'giorni'}${isCur ? ', oggi escluso' : ''})</h2>
       <div class="grid">
         ${stat('😴 Sonno totale', dur(w.total), hasPrev ? delta(w.total, p.total, 'dur') : '')}
@@ -490,6 +613,7 @@ function weekHTML() {
         ${stat('🥣 Pasti', num(w.meal), hasPrev ? delta(w.meal, p.meal, 'num') : '')}
         ${stat('💩 Cacche', num(w.poop), hasPrev ? delta(w.poop, p.poop, 'num') : '')}
       </div></div>
+    ${notesCard}
     <div class="card"><h2>Ore di sonno per giorno</h2>${chart}
       <div class="legend"><span><i class="dot night"></i>Notte</span><span><i class="dot nap"></i>Pisolini</span></div></div>
     <div class="card"><h2>Risvegli di notte</h2>${miniChart(w.days, (x) => x.wakes, 'var(--night)', (v) => v)}</div>
@@ -505,9 +629,13 @@ function moreHTML() {
   return `<div class="card"><h2>Nome del piccolo</h2>
       <label><input type="text" id="nameInput" value="${esc(S.settings.childName || '')}" maxlength="30" placeholder="Nome"></label>
       <button class="btn primary block" data-act="saveName">Salva nome</button></div>
+    <div class="card"><h2>Suggerimenti</h2>
+      <label class="chk"><input type="checkbox" data-change="toggleSugg" ${localStorage.getItem('nanna_sugg_off') === '1' ? '' : 'checked'}> Mostra il suggerimento sul prossimo pisolino (solo su questo telefono)</label></div>
     <div class="card"><h2>Account</h2>
       <p>${S.mode === 'firebase' ? `Collegato come <b>${esc(who())}</b>` : 'Modalità prova (nessun account)'}</p>
       ${S.mode === 'firebase' ? '<button class="btn block" data-act="logout">Esci</button>' : ''}</div>
+    <div class="card"><h2>Documento per l'assistente</h2><p class="muted small">Descrive come è fatta l'app. Dallo a un'AI insieme ai file quando vuoi farla modificare.</p>
+      <div class="row2"><button class="btn" data-act="copyDoc">📋 Copia</button><button class="btn" data-act="showDoc">👁️ Leggi</button></div></div>
     <div class="card"><h2>Backup</h2><p class="muted small">Scarica una copia di tutti i dati in un file.</p>
       <button class="btn block" data-act="export">⬇️ Scarica backup (JSON)</button></div>
     <div class="card"><h2>Novità · versione ${VERSION}</h2>
@@ -533,6 +661,7 @@ document.addEventListener('click', (e) => {
     if (k === 'close') closeModal();
     else if (k === 'save') M.save && M.save();
     else if (k === 'del') M.del && M.del();
+    else if (k === 'copy') M.copy && M.copy();
     else if (k === 'addwake') { $('#wakes').insertAdjacentHTML('beforeend', wakeEditRow({ start: Date.now(), end: null, fed: false })); }
     else if (k === 'rmwake') m.closest('.wrow').remove();
     else if (k === 'new') { const kind = m.dataset.k; modalEl().hidden = true; newItem(kind); }
@@ -664,7 +793,7 @@ async function boot() {
     }
   } else {
     S.mode = 'demo';
-    api = makeDemoApi((data) => { S.sleeps = data.sleeps; S.events = data.events; S.settings = data.settings; S.ready = true; render(); });
+    api = makeDemoApi((data) => { S.sleeps = data.sleeps; S.events = data.events; S.notes = data.notes; S.settings = data.settings; S.ready = true; render(); });
     $('#boot').hidden = true;
     $('#app').hidden = false;
   }

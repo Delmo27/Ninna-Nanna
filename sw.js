@@ -1,6 +1,6 @@
 // Service worker: prima la rete (così gli aggiornamenti arrivano subito), cache come riserva offline.
-const CACHE = 'nanna-v1';
-const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'nanna-v2';
+const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.json', 'assistente.md', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL).catch(() => {})));
